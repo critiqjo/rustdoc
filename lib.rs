@@ -8,15 +8,10 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-#![crate_name = "rustdoc"]
-#![unstable(feature = "rustdoc", issue = "27812")]
-#![crate_type = "dylib"]
-#![crate_type = "rlib"]
 #![doc(html_logo_url = "https://www.rust-lang.org/logos/rust-logo-128x128-blk-v2.png",
        html_favicon_url = "https://doc.rust-lang.org/favicon.ico",
        html_root_url = "https://doc.rust-lang.org/nightly/",
        html_playground_url = "https://play.rust-lang.org/")]
-#![cfg_attr(not(stage0), deny(warnings))]
 
 #![feature(box_patterns)]
 #![feature(box_syntax)]
@@ -335,8 +330,8 @@ fn parse_externs(matches: &getopts::Matches) -> Result<core::Externs, String> {
         let mut parts = arg.splitn(2, '=');
         let name = parts.next().ok_or("--extern value must not be empty".to_string())?;
         let location = parts.next()
-                                 .ok_or("--extern value must be of the format `foo=bar`"
-                                    .to_string())?;
+                            .ok_or("--extern value must be of the format `foo=bar`"
+                            .to_string())?;
         let name = name.to_string();
         externs.entry(name).or_insert(vec![]).push(location.to_string());
     }
