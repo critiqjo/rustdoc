@@ -49,6 +49,10 @@ extern crate std_unicode;
 #[macro_use] extern crate log;
 extern crate rustc_errors as errors;
 
+extern crate pulldown_cmark as cmark;
+extern crate hamlet;
+extern crate cmark_hamlet;
+
 extern crate serialize as rustc_serialize; // used by deriving
 
 use std::collections::{BTreeMap, BTreeSet};

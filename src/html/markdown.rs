@@ -10,11 +10,11 @@
 
 //! Markdown formatting for rustdoc
 //!
-//! This module _does not_ implement markdown formatting through the hoedown
-//! C-library! This module _does not_ self-contain the C bindings and necessary
-//! legwork to render markdown, and exposes all of the functionality through a
-//! unit-struct, `Markdown`, which has an implementation of `fmt::Display`.
-//! Example usage:
+//! This module implements markdown formatting through pulldown-cmark crate for
+//! markdown parsing, hamlet crate for html rendering, and cmark-hamlet crate
+//! as the bridge between them! This module exposes all of the functionality
+//! through a unit-struct, `Markdown`, which has an implementation of
+//! `fmt::Display`. Example usage:
 //!
 //! ```rust,ignore
 //! use rustdoc::html::markdown::Markdown;
@@ -24,15 +24,19 @@
 //! // ... something using html
 //! ```
 
+use std::borrow::Cow;
 use std::cell::RefCell;
-use std::fmt;
+use std::fmt::{self, Write};
 use syntax::feature_gate::UnstableFeatures;
+
+use cmark::{Event as CmEvent, Options, Parser, Tag};
+use hamlet::Token as HmToken;
+use cmark_hamlet;
 
 //use html::render::derive_id;
 //use html::toc::TocBuilder;
-//use html::highlight;
-//use html::escape::Escape;
-//use test;
+use html::highlight;
+use test;
 
 /// A unit struct which has the `fmt::Display` trait implemented. When
 /// formatted, this struct will emit the HTML corresponding to the rendered
@@ -46,7 +50,6 @@ pub struct MarkdownWithToc<'a>(pub &'a str);
 /// documentation but used in example code. `code` is the portion of
 /// `s` that should be used in tests. (None for lines that should be
 /// left as-is.)
-#[allow(dead_code)]
 fn stripped_filtered_line<'a>(s: &'a str) -> Option<&'a str> {
     let trimmed = s.trim();
     if trimmed == "#" {
@@ -73,12 +76,112 @@ thread_local!(pub static PLAYGROUND: RefCell<Option<(Option<String>, String)>> =
     RefCell::new(None)
 });
 
-pub fn render(_: &mut fmt::Formatter, _: &str, _: bool) -> fmt::Result {
-    unimplemented!()
+pub fn render(w: &mut fmt::Formatter, md: &str, _: bool) -> fmt::Result {
+    let mut rust_block = false;
+    for hm_tok in cmark_hamlet::Adapter::new(Parser::new_ext(md, Options::all()), true) {
+        match hm_tok {
+            HmToken::StartTag { ref name, .. } |
+            HmToken::EndTag { ref name } if rust_block && name.as_ref() == "code" => (),
+            HmToken::StartTag { name: Cow::Borrowed("pre"), ref attrs, .. } => {
+                let is_rust = attrs.get("data-lang")
+                                   .map(|lang| LangString::parse(lang).rust);
+                if let Some(true) = is_rust {
+                    rust_block = true;
+                } else {
+                    try!(write!(w, "{}", hm_tok));
+                }
+            }
+            HmToken::Text(ref text) if rust_block => {
+                let code = text.as_ref();
+                // insert newline to clearly separate it from the
+                // previous block so we can shorten the html output
+                let mut out = String::from("\n");
+                PLAYGROUND.with(|play| {
+                    let playground_button = play.borrow().as_ref().and_then(|&(ref krate, ref url)| {
+                        if url.is_empty() {
+                            return None;
+                        }
+                        let test = code.lines().map(|l| {
+                            stripped_filtered_line(l).unwrap_or(l)
+                        }).collect::<Vec<&str>>().join("\n");
+                        let krate = krate.as_ref().map(|s| &**s);
+                        let test = test::maketest(&test, krate, false,
+                                                  &Default::default());
+                        let channel = if test.contains("#![feature(") {
+                            "&amp;version=nightly"
+                        } else {
+                            ""
+                        };
+                        // These characters don't need to be escaped in a URI.
+                        // FIXME: use a library function for percent encoding.
+                        fn dont_escape(c: u8) -> bool {
+                            (b'a' <= c && c <= b'z') ||
+                            (b'A' <= c && c <= b'Z') ||
+                            (b'0' <= c && c <= b'9') ||
+                            c == b'-' || c == b'_' || c == b'.' ||
+                            c == b'~' || c == b'!' || c == b'\'' ||
+                            c == b'(' || c == b')' || c == b'*'
+                        }
+                        let mut test_escaped = String::new();
+                        for b in test.bytes() {
+                            if dont_escape(b) {
+                                test_escaped.push(char::from(b));
+                            } else {
+                                write!(test_escaped, "%{:02X}", b).unwrap();
+                            }
+                        }
+                        Some(format!(
+                            r#"<a class="test-arrow" target="_blank" href="{}?code={}{}">Run</a>"#,
+                            url, test_escaped, channel
+                        ))
+                    });
+                    let filtered_code = code.lines().filter(|l| {
+                        stripped_filtered_line(l).is_none()
+                    }).collect::<Vec<&str>>().join("\n");
+                    out.push_str(&highlight::render_with_highlighting(
+                                   &filtered_code,
+                                   Some("rust-example-rendered"),
+                                   None,
+                                   playground_button.as_ref().map(String::as_str)));
+                });
+                try!(write!(w, "{}", out));
+            }
+            HmToken::EndTag { name: Cow::Borrowed("pre") } if rust_block => {
+                rust_block = false;
+            }
+            _ => try!(write!(w, "{}", hm_tok)),
+        }
+    }
+    Ok(())
 }
 
-pub fn find_testable_code(_: &str, _: &mut ::test::Collector) {
-    unimplemented!()
+pub fn find_testable_code(md: &str, tests: &mut ::test::Collector) {
+    let mut block_info = None;
+    for hm_tok in cmark_hamlet::Adapter::new(Parser::new(md), true) {
+        match hm_tok {
+            HmToken::StartTag { name: Cow::Borrowed("pre"), attrs, .. } => {
+                block_info = attrs.get("data-lang")
+                                  .map(|lang| LangString::parse(lang));
+            }
+            HmToken::Text(ref text) if block_info.is_some() => {
+                let block_info = block_info.as_ref().unwrap();
+                if block_info.rust {
+                    let lines = text.lines().map(|l| {
+                        stripped_filtered_line(l).unwrap_or(l)
+                    });
+                    let clean_code = lines.collect::<Vec<&str>>().join("\n");
+                    tests.add_test(clean_code,
+                                   block_info.should_panic, block_info.no_run,
+                                   block_info.ignore, block_info.test_harness,
+                                   block_info.compile_fail, block_info.error_codes.clone()); // FIXME clone?
+                }
+            }
+            HmToken::EndTag { name: Cow::Borrowed("pre") } if block_info.is_some() => {
+                block_info = None;
+            }
+            _ => (),
+        }
+    }
 }
 
 #[derive(Eq, PartialEq, Clone, Debug)]
@@ -92,7 +195,6 @@ struct LangString {
     error_codes: Vec<String>,
 }
 
-#[allow(dead_code)]
 impl LangString {
     fn all_false() -> LangString {
         LangString {
@@ -168,8 +270,21 @@ impl<'a> fmt::Display for MarkdownWithToc<'a> {
     }
 }
 
-pub fn plain_summary_line(_: &str) -> String {
-    unimplemented!()
+pub fn plain_summary_line(md: &str) -> String {
+    let events = Parser::new(md).map(|ev| match ev {
+        CmEvent::Start(Tag::Code) => CmEvent::Text(Cow::Borrowed("`")),
+        CmEvent::End(Tag::Code) => CmEvent::Text(Cow::Borrowed("`")),
+        CmEvent::Text(_) => ev,
+        //CmEvent::SoftBreak | CmEvent::HardBreak => ev,
+        _ => CmEvent::Text(Cow::Borrowed("")),
+    });
+
+    let hm_toks = cmark_hamlet::Adapter::new(events, false);
+    let mut ret = String::from("");
+    for tok in hm_toks {
+        write!(ret, "{}", tok).unwrap();
+    }
+    ret
 }
 
 #[cfg(test)]
