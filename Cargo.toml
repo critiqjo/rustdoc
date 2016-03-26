@@ -6,3 +6,9 @@ version = "0.0.0"
 [[bin]]
 name = "rustdoc"
 path = "src/lib.rs"
+
+[dependencies]
+maud = "0.8.0"
+maud_macros = "*"
+maud-pulldown-cmark = "^0.1"
+pulldown-cmark = "0.0.5"

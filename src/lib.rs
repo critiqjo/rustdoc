@@ -26,6 +26,9 @@
 #![feature(unicode)]
 #![feature(question_mark)]
 
+#![feature(plugin)]
+#![plugin(maud_macros)]
+
 extern crate arena;
 extern crate getopts;
 extern crate libc;
@@ -42,6 +45,10 @@ extern crate serialize;
 extern crate test as testing;
 extern crate rustc_unicode;
 #[macro_use] extern crate log;
+
+extern crate maud;
+extern crate maud_pulldown_cmark;
+extern crate pulldown_cmark;
 
 extern crate serialize as rustc_serialize; // used by deriving
 

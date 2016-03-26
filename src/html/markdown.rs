@@ -25,15 +25,19 @@
 //! ```
 
 use rustc::session::config::get_unstable_features_setting;
+use std::borrow::Cow;
 use std::cell::RefCell;
 use std::fmt;
 use syntax::feature_gate::UnstableFeatures;
 
+use maud_pulldown_cmark::Markdown as CMarkMaudAda;
+use pulldown_cmark::{Parser, Event, Tag};
+
 //use html::render::derive_id;
 //use html::toc::TocBuilder;
-//use html::highlight;
-//use html::escape::Escape;
-//use test;
+use html::highlight;
+use html::escape::Escape;
+use test;
 
 /// A unit struct which has the `fmt::Display` trait implemented. When
 /// formatted, this struct will emit the HTML corresponding to the rendered
@@ -47,7 +51,6 @@ pub struct MarkdownWithToc<'a>(pub &'a str);
 /// documentation but used in example code. `code` is the portion of
 /// `s` that should be used in tests. (None for lines that should be
 /// left as-is.)
-#[allow(dead_code)]
 fn stripped_filtered_line<'a>(s: &'a str) -> Option<&'a str> {
     let trimmed = s.trim();
     if trimmed == "#" {
@@ -72,8 +75,57 @@ thread_local!(pub static PLAYGROUND_KRATE: RefCell<Option<Option<String>>> = {
     RefCell::new(None)
 });
 
-pub fn render(_: &mut fmt::Formatter, _: &str, _: bool) -> fmt::Result {
-    unimplemented!()
+pub fn render(w: &mut fmt::Formatter, md: &str, _: bool) -> fmt::Result {
+    let mut rust_block = None;
+    let events = Parser::new(md).map(|ev| match ev {
+        Event::Start(Tag::CodeBlock(lang)) => {
+            info!("lang: {}", lang);
+            if LangString::parse(&*lang).rust {
+                rust_block = Some(String::from(""));
+                Event::Html(Cow::Borrowed(""))
+            } else {
+                Event::Start(Tag::CodeBlock(lang))
+            }
+        },
+        ev @ Event::End(Tag::CodeBlock(_)) => {
+            if rust_block.is_some() {
+                let code = rust_block.take().unwrap();
+                let mut s = String::from("\n");
+                PLAYGROUND_KRATE.with(|krate| {
+                    // insert newline to clearly separate it from the
+                    // previous block so we can shorten the html output
+                    krate.borrow().as_ref().map(|krate| {
+                        let test = code.lines().map(|l| {
+                            stripped_filtered_line(l).unwrap_or(l)
+                        }).collect::<Vec<&str>>().join("\n");
+                        let krate = krate.as_ref().map(|s| &**s);
+                        let test = test::maketest(&test, krate, false,
+                                                  &Default::default());
+                        s.push_str(&format!("<span class='rusttest'>{}</span>", Escape(&test)));
+                    });
+                    s.push_str(&highlight::highlight(&code,
+                                                     Some("rust-example-rendered"),
+                                                     None));
+                });
+                Event::Html(Cow::Owned(s))
+            } else {
+                ev
+            }
+        },
+        Event::Text(text) => {
+            if let Some(code) = rust_block.as_mut() {
+                code.push_str(&*text);
+                Event::Html(Cow::Borrowed(""))
+            } else {
+                Event::Text(text)
+            }
+        },
+        _ => ev,
+    });
+
+    html!(*w, {
+        ^CMarkMaudAda::from_events(events)
+    })
 }
 
 pub fn find_testable_code(_: &str, _: &mut ::test::Collector) {
@@ -90,7 +142,6 @@ struct LangString {
     compile_fail: bool,
 }
 
-#[allow(dead_code)]
 impl LangString {
     fn all_false() -> LangString {
         LangString {
@@ -155,8 +206,24 @@ impl<'a> fmt::Display for MarkdownWithToc<'a> {
     }
 }
 
-pub fn plain_summary_line(_: &str) -> String {
-    unimplemented!()
+pub fn plain_summary_line(md: &str) -> String {
+    let events = Parser::new(md).map(|ev| match ev {
+        Event::Start(Tag::Code) => Event::Text(Cow::Borrowed("`")),
+        Event::End(Tag::Code) => Event::Text(Cow::Borrowed("`")),
+        Event::Start(Tag::Link(_, text)) => Event::Text(text),
+        Event::Start(Tag::Image(_, text)) => Event::Text(text),
+        Event::Html(html) | Event::InlineHtml(html) => Event::Text(html),
+        ev @ Event::Text(_) => ev,
+        _ => Event::Html(Cow::Borrowed("")),
+    });
+
+    let mut buf = String::new();
+
+    html!(buf, {
+        ^CMarkMaudAda::from_events(events)
+    }).unwrap();
+
+    buf
 }
 
 #[cfg(test)]
