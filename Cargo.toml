@@ -2,7 +2,3 @@
 authors = ["The Rust Project Developers"]
 name = "rustdoc"
 version = "0.0.0"
-
-[[bin]]
-name = "rustdoc"
-path = "lib.rs"
