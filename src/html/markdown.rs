@@ -117,7 +117,7 @@ pub fn render(w: &mut fmt::Formatter, md: &str, _: bool) -> fmt::Result {
             HmToken::EndTag { ref name } if is_header(name.as_ref()) => {
                 let id = id_from_text(&*header_id_buf);
                 try!(write!(w,
-                            "{start}<a href=\"#{id}\">{inner}</a>{end}",
+                            "\n{start}<a href=\"#{id}\">{inner}</a>{end}",
                             start = HmToken::start_tag(name.as_ref(),
                                                        attrs!(id = &*id,
                                                               class = "section-header")),
@@ -325,18 +325,13 @@ impl<'a> fmt::Display for MarkdownWithToc<'a> {
 }
 
 pub fn plain_summary_line(md: &str) -> String {
-    let events = Parser::new(md).map(|ev| match ev {
-        CmEvent::Start(Tag::Code) => CmEvent::Text(Cow::Borrowed("`")),
-        CmEvent::End(Tag::Code) => CmEvent::Text(Cow::Borrowed("`")),
-        CmEvent::Text(_) => ev,
-        //CmEvent::SoftBreak | CmEvent::HardBreak => ev,
-        _ => CmEvent::Text(Cow::Borrowed("")),
-    });
-
-    let hm_toks = cmark_hamlet::Adapter::new(events, false);
     let mut ret = String::from("");
-    for tok in hm_toks {
-        write!(ret, "{}", tok).unwrap();
+    for ev in Parser::new(md) {
+        match ev {
+            CmEvent::Start(Tag::Code) | CmEvent::End(Tag::Code) => ret.push('`'),
+            CmEvent::Text(text) => ret.push_str(text.as_ref()),
+            _ => (),
+        }
     }
     ret
 }
@@ -396,17 +391,17 @@ mod tests {
             reset_ids(true);
         }
 
-        t("# Foo bar", "\n<h1 id='foo-bar' class='section-header'>\
-          <a href='#foo-bar'>Foo bar</a></h1>");
-        t("## Foo-bar_baz qux", "\n<h2 id='foo-bar_baz-qux' class=\'section-\
-          header'><a href='#foo-bar_baz-qux'>Foo-bar_baz qux</a></h2>");
+        t("# Foo bar", "\n<h1 id=\"foo-bar\" class=\"section-header\">\
+          <a href=\"#foo-bar\">Foo bar</a></h1>");
+        t("## Foo-bar_baz qux", "\n<h2 id=\"foo-bar_baz-qux\" class=\"section-\
+          header\"><a href=\"#foo-bar_baz-qux\">Foo-bar_baz qux</a></h2>");
         t("### **Foo** *bar* baz!?!& -_qux_-%",
-          "\n<h3 id='foo-bar-baz--_qux_-' class='section-header'>\
-          <a href='#foo-bar-baz--_qux_-'><strong>Foo</strong> \
-          <em>bar</em> baz!?!&amp; -_qux_-%</a></h3>");
-        t("####**Foo?** & \\*bar?!*  _`baz`_ ❤ #qux",
-          "\n<h4 id='foo--bar--baz--qux' class='section-header'>\
-          <a href='#foo--bar--baz--qux'><strong>Foo?</strong> &amp; *bar?!*  \
+          "\n<h3 id=\"foo-bar-baz--qux-\" class=\"section-header\">\
+          <a href=\"#foo-bar-baz--qux-\"><strong>Foo</strong> \
+          <em>bar</em> baz!?!&amp; -<em>qux</em>-%</a></h3>");
+        t("#### **Foo?** & \\*bar?!*  _`baz`_ ❤ #qux",
+          "\n<h4 id=\"foo--bar--baz--qux\" class=\"section-header\">\
+          <a href=\"#foo--bar--baz--qux\"><strong>Foo?</strong> &amp; *bar?!*  \
           <em><code>baz</code></em> ❤ #qux</a></h4>");
     }
 
@@ -418,18 +413,18 @@ mod tests {
         }
 
         let test = || {
-            t("# Example", "\n<h1 id='example' class='section-header'>\
-              <a href='#example'>Example</a></h1>");
-            t("# Panics", "\n<h1 id='panics' class='section-header'>\
-              <a href='#panics'>Panics</a></h1>");
-            t("# Example", "\n<h1 id='example-1' class='section-header'>\
-              <a href='#example-1'>Example</a></h1>");
-            t("# Main", "\n<h1 id='main-1' class='section-header'>\
-              <a href='#main-1'>Main</a></h1>");
-            t("# Example", "\n<h1 id='example-2' class='section-header'>\
-              <a href='#example-2'>Example</a></h1>");
-            t("# Panics", "\n<h1 id='panics-1' class='section-header'>\
-              <a href='#panics-1'>Panics</a></h1>");
+            t("# Example", "\n<h1 id=\"example\" class=\"section-header\">\
+              <a href=\"#example\">Example</a></h1>");
+            t("# Panics", "\n<h1 id=\"panics\" class=\"section-header\">\
+              <a href=\"#panics\">Panics</a></h1>");
+            t("# Example", "\n<h1 id=\"example-1\" class=\"section-header\">\
+              <a href=\"#example-1\">Example</a></h1>");
+            t("# Main", "\n<h1 id=\"main-1\" class=\"section-header\">\
+              <a href=\"#main-1\">Main</a></h1>");
+            t("# Example", "\n<h1 id=\"example-2\" class=\"section-header\">\
+              <a href=\"#example-2\">Example</a></h1>");
+            t("# Panics", "\n<h1 id=\"panics-1\" class=\"section-header\">\
+              <a href=\"#panics-1\">Panics</a></h1>");
         };
         test();
         reset_ids(true);
