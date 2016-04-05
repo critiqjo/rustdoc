@@ -203,6 +203,9 @@ pub fn render(w: &mut fmt::Formatter, md: &str, _: bool) -> fmt::Result {
             HmToken::EndTag { name: Cow::Borrowed("pre") } if rust_block => {
                 rust_block = false;
             }
+            HmToken::EndTag { name: Cow::Borrowed("p") } => {
+                try!(write!(w, "{}\n\n", hm_tok)); // hack to make render::shorter() work
+            }
             _ => try!(write!(w, "{}", hm_tok)),
         }
     }
