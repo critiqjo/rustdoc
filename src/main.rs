@@ -50,7 +50,7 @@ extern crate std_unicode;
 extern crate rustc_errors as errors;
 
 extern crate pulldown_cmark as cmark;
-extern crate hamlet;
+#[macro_use] extern crate hamlet;
 extern crate cmark_hamlet;
 
 extern crate serialize as rustc_serialize; // used by deriving

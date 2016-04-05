@@ -24,6 +24,7 @@
 //! // ... something using html
 //! ```
 
+use std::ascii::AsciiExt;
 use std::borrow::Cow;
 use std::cell::RefCell;
 use std::fmt::{self, Write};
@@ -33,7 +34,7 @@ use cmark::{Event as CmEvent, Options, Parser, Tag};
 use hamlet::Token as HmToken;
 use cmark_hamlet;
 
-//use html::render::derive_id;
+use html::render::derive_id;
 //use html::toc::TocBuilder;
 use html::highlight;
 use test;
@@ -76,13 +77,64 @@ thread_local!(pub static PLAYGROUND: RefCell<Option<(Option<String>, String)>> =
     RefCell::new(None)
 });
 
+fn is_header(tag_name: &str) -> bool {
+    if tag_name.len() == 2 {
+        tag_name.char_indices().all(|(i, c)| {
+            (i == 0 && c == 'h') || (i == 1 && c >= '1' && c <= '6')
+        })
+    } else {
+        false
+    }
+}
+
+fn id_from_text(text: &str) -> String {
+    let id = text.chars().filter_map(|c| {
+        if c.is_alphanumeric() || c == '-' || c == '_' {
+            if c.is_ascii() {
+                Some(c.to_ascii_lowercase())
+            } else {
+                Some(c)
+            }
+        } else if c.is_whitespace() && c.is_ascii() {
+            Some('-')
+        } else {
+            None
+        }
+    }).collect::<String>();
+    derive_id(id)
+}
+
 pub fn render(w: &mut fmt::Formatter, md: &str, _: bool) -> fmt::Result {
     let mut rust_block = false;
+    let mut header = false;
+    let mut header_inner_buf = String::from("");
+    let mut header_id_buf = String::from("");
     for hm_tok in cmark_hamlet::Adapter::new(Parser::new_ext(md, Options::all()), true) {
         match hm_tok {
-            HmToken::StartTag { ref name, .. } |
-            HmToken::EndTag { ref name } if rust_block && name.as_ref() == "code" => (),
-            HmToken::StartTag { name: Cow::Borrowed("pre"), ref attrs, .. } => {
+            HmToken::StartTag { ref name, .. } if is_header(name.as_ref()) => {
+                header = true;
+            }
+            HmToken::EndTag { ref name } if is_header(name.as_ref()) => {
+                let id = id_from_text(&*header_id_buf);
+                try!(write!(w,
+                            "{start}<a href=\"#{id}\">{inner}</a>{end}",
+                            start = HmToken::start_tag(name.as_ref(),
+                                                       attrs!(id = &*id,
+                                                              class = "section-header")),
+                            id = &*id,
+                            inner = header_inner_buf,
+                            end = hm_tok));
+                header = false;
+                header_id_buf.truncate(0);
+                header_inner_buf.truncate(0);
+            }
+            _ if header => {
+                if let HmToken::Text(ref text) = hm_tok {
+                    try!(write!(header_id_buf, "{}", text));
+                }
+                try!(write!(header_inner_buf, "{}", hm_tok));
+            }
+            HmToken::StartTag { ref name, ref attrs, .. } if name.as_ref() == "pre" => {
                 let is_rust = attrs.get("data-lang")
                                    .map(|lang| LangString::parse(lang).rust);
                 if let Some(true) = is_rust {
@@ -91,6 +143,8 @@ pub fn render(w: &mut fmt::Formatter, md: &str, _: bool) -> fmt::Result {
                     try!(write!(w, "{}", hm_tok));
                 }
             }
+            HmToken::StartTag { ref name, .. } |
+            HmToken::EndTag { ref name } if rust_block && name.as_ref() == "code" => (),
             HmToken::Text(ref text) if rust_block => {
                 let code = text.as_ref();
                 // insert newline to clearly separate it from the
