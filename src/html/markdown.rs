@@ -10,11 +10,11 @@
 
 //! Markdown formatting for rustdoc
 //!
-//! This module _does not_ implement markdown formatting through the hoedown
-//! C-library! This module _does not_ self-contain the C bindings and necessary
-//! legwork to render markdown, and exposes all of the functionality through a
-//! unit-struct, `Markdown`, which has an implementation of `fmt::Display`.
-//! Example usage:
+//! This module implements markdown formatting through pulldown-cmark crate for
+//! markdown parsing, hamlet crate for html rendering, and cmark-hamlet crate
+//! as the bridge between them! This module exposes all of the functionality
+//! through a unit-struct, `Markdown`, which has an implementation of
+//! `fmt::Display`. Example usage:
 //!
 //! ```rust,ignore
 //! use rustdoc::html::markdown::Markdown;
@@ -24,15 +24,20 @@
 //! // ... something using html
 //! ```
 
+use std::ascii::AsciiExt;
+use std::borrow::Cow;
 use std::cell::RefCell;
-use std::fmt;
+use std::fmt::{self, Write};
 use syntax::feature_gate::UnstableFeatures;
 
-//use html::render::derive_id;
+use cmark::{Event as CmEvent, Options, Parser, Tag};
+use hamlet::Token as HmToken;
+use cmark_hamlet;
+
+use html::render::derive_id;
 //use html::toc::TocBuilder;
-//use html::highlight;
-//use html::escape::Escape;
-//use test;
+use html::highlight;
+use test;
 
 /// A unit struct which has the `fmt::Display` trait implemented. When
 /// formatted, this struct will emit the HTML corresponding to the rendered
@@ -46,7 +51,6 @@ pub struct MarkdownWithToc<'a>(pub &'a str);
 /// documentation but used in example code. `code` is the portion of
 /// `s` that should be used in tests. (None for lines that should be
 /// left as-is.)
-#[allow(dead_code)]
 fn stripped_filtered_line<'a>(s: &'a str) -> Option<&'a str> {
     let trimmed = s.trim();
     if trimmed == "#" {
@@ -73,12 +77,168 @@ thread_local!(pub static PLAYGROUND: RefCell<Option<(Option<String>, String)>> =
     RefCell::new(None)
 });
 
-pub fn render(_: &mut fmt::Formatter, _: &str, _: bool) -> fmt::Result {
-    unimplemented!()
+fn is_header(tag_name: &str) -> bool {
+    if tag_name.len() == 2 {
+        tag_name.char_indices().all(|(i, c)| {
+            (i == 0 && c == 'h') || (i == 1 && c >= '1' && c <= '6')
+        })
+    } else {
+        false
+    }
 }
 
-pub fn find_testable_code(_: &str, _: &mut ::test::Collector) {
-    unimplemented!()
+fn id_from_text(text: &str) -> String {
+    let id = text.chars().filter_map(|c| {
+        if c.is_alphanumeric() || c == '-' || c == '_' {
+            if c.is_ascii() {
+                Some(c.to_ascii_lowercase())
+            } else {
+                Some(c)
+            }
+        } else if c.is_whitespace() && c.is_ascii() {
+            Some('-')
+        } else {
+            None
+        }
+    }).collect::<String>();
+    derive_id(id)
+}
+
+pub fn render(w: &mut fmt::Formatter, md: &str, _: bool) -> fmt::Result {
+    let mut rust_block = false;
+    let mut header = false;
+    let mut header_inner_buf = String::from("");
+    let mut header_id_buf = String::from("");
+    for hm_tok in cmark_hamlet::Adapter::new(Parser::new_ext(md, Options::all()), true) {
+        match hm_tok {
+            HmToken::StartTag { ref name, .. } if is_header(name.as_ref()) => {
+                header = true;
+            }
+            HmToken::EndTag { ref name } if is_header(name.as_ref()) => {
+                let id = id_from_text(&*header_id_buf);
+                try!(write!(w,
+                            "\n{start}<a href=\"#{id}\">{inner}</a>{end}",
+                            start = HmToken::start_tag(name.as_ref(),
+                                                       attrs!(id = &*id,
+                                                              class = "section-header")),
+                            id = &*id,
+                            inner = header_inner_buf,
+                            end = hm_tok));
+                header = false;
+                header_id_buf.truncate(0);
+                header_inner_buf.truncate(0);
+            }
+            _ if header => {
+                if let HmToken::Text(ref text) = hm_tok {
+                    try!(write!(header_id_buf, "{}", text));
+                }
+                try!(write!(header_inner_buf, "{}", hm_tok));
+            }
+            HmToken::StartTag { ref name, ref attrs, .. } if name.as_ref() == "pre" => {
+                let is_rust = attrs.get("data-lang")
+                                   .map(|lang| LangString::parse(lang).rust);
+                if let Some(true) = is_rust {
+                    rust_block = true;
+                } else {
+                    try!(write!(w, "{}", hm_tok));
+                }
+            }
+            HmToken::StartTag { ref name, .. } |
+            HmToken::EndTag { ref name } if rust_block && name.as_ref() == "code" => (),
+            HmToken::Text(ref text) if rust_block => {
+                let code = text.as_ref();
+                // insert newline to clearly separate it from the
+                // previous block so we can shorten the html output
+                let mut out = String::from("\n");
+                PLAYGROUND.with(|play| {
+                    let playground_button = play.borrow().as_ref().and_then(|&(ref krate, ref url)| {
+                        if url.is_empty() {
+                            return None;
+                        }
+                        let test = code.lines().map(|l| {
+                            stripped_filtered_line(l).unwrap_or(l)
+                        }).collect::<Vec<&str>>().join("\n");
+                        let krate = krate.as_ref().map(|s| &**s);
+                        let test = test::maketest(&test, krate, false,
+                                                  &Default::default());
+                        let channel = if test.contains("#![feature(") {
+                            "&amp;version=nightly"
+                        } else {
+                            ""
+                        };
+                        // These characters don't need to be escaped in a URI.
+                        // FIXME: use a library function for percent encoding.
+                        fn dont_escape(c: u8) -> bool {
+                            (b'a' <= c && c <= b'z') ||
+                            (b'A' <= c && c <= b'Z') ||
+                            (b'0' <= c && c <= b'9') ||
+                            c == b'-' || c == b'_' || c == b'.' ||
+                            c == b'~' || c == b'!' || c == b'\'' ||
+                            c == b'(' || c == b')' || c == b'*'
+                        }
+                        let mut test_escaped = String::new();
+                        for b in test.bytes() {
+                            if dont_escape(b) {
+                                test_escaped.push(char::from(b));
+                            } else {
+                                write!(test_escaped, "%{:02X}", b).unwrap();
+                            }
+                        }
+                        Some(format!(
+                            r#"<a class="test-arrow" target="_blank" href="{}?code={}{}">Run</a>"#,
+                            url, test_escaped, channel
+                        ))
+                    });
+                    let filtered_code = code.lines().filter(|l| {
+                        stripped_filtered_line(l).is_none()
+                    }).collect::<Vec<&str>>().join("\n");
+                    out.push_str(&highlight::render_with_highlighting(
+                                   &filtered_code,
+                                   Some("rust-example-rendered"),
+                                   None,
+                                   playground_button.as_ref().map(String::as_str)));
+                });
+                try!(write!(w, "{}", out));
+            }
+            HmToken::EndTag { name: Cow::Borrowed("pre") } if rust_block => {
+                rust_block = false;
+            }
+            HmToken::EndTag { name: Cow::Borrowed("p") } => {
+                try!(write!(w, "{}\n\n", hm_tok)); // hack to make render::shorter() work
+            }
+            _ => try!(write!(w, "{}", hm_tok)),
+        }
+    }
+    Ok(())
+}
+
+pub fn find_testable_code(md: &str, tests: &mut ::test::Collector) {
+    let mut block_info = None;
+    for hm_tok in cmark_hamlet::Adapter::new(Parser::new(md), true) {
+        match hm_tok {
+            HmToken::StartTag { name: Cow::Borrowed("pre"), attrs, .. } => {
+                block_info = attrs.get("data-lang")
+                                  .map(|lang| LangString::parse(lang));
+            }
+            HmToken::Text(ref text) if block_info.is_some() => {
+                let block_info = block_info.as_ref().unwrap();
+                if block_info.rust {
+                    let lines = text.lines().map(|l| {
+                        stripped_filtered_line(l).unwrap_or(l)
+                    });
+                    let clean_code = lines.collect::<Vec<&str>>().join("\n");
+                    tests.add_test(clean_code,
+                                   block_info.should_panic, block_info.no_run,
+                                   block_info.ignore, block_info.test_harness,
+                                   block_info.compile_fail, block_info.error_codes.clone()); // FIXME clone?
+                }
+            }
+            HmToken::EndTag { name: Cow::Borrowed("pre") } if block_info.is_some() => {
+                block_info = None;
+            }
+            _ => (),
+        }
+    }
 }
 
 #[derive(Eq, PartialEq, Clone, Debug)]
@@ -92,7 +252,6 @@ struct LangString {
     error_codes: Vec<String>,
 }
 
-#[allow(dead_code)]
 impl LangString {
     fn all_false() -> LangString {
         LangString {
@@ -168,8 +327,16 @@ impl<'a> fmt::Display for MarkdownWithToc<'a> {
     }
 }
 
-pub fn plain_summary_line(_: &str) -> String {
-    unimplemented!()
+pub fn plain_summary_line(md: &str) -> String {
+    let mut ret = String::from("");
+    for ev in Parser::new(md) {
+        match ev {
+            CmEvent::Start(Tag::Code) | CmEvent::End(Tag::Code) => ret.push('`'),
+            CmEvent::Text(text) => ret.push_str(text.as_ref()),
+            _ => (),
+        }
+    }
+    ret
 }
 
 #[cfg(test)]
@@ -227,17 +394,17 @@ mod tests {
             reset_ids(true);
         }
 
-        t("# Foo bar", "\n<h1 id='foo-bar' class='section-header'>\
-          <a href='#foo-bar'>Foo bar</a></h1>");
-        t("## Foo-bar_baz qux", "\n<h2 id='foo-bar_baz-qux' class=\'section-\
-          header'><a href='#foo-bar_baz-qux'>Foo-bar_baz qux</a></h2>");
+        t("# Foo bar", "\n<h1 id=\"foo-bar\" class=\"section-header\">\
+          <a href=\"#foo-bar\">Foo bar</a></h1>");
+        t("## Foo-bar_baz qux", "\n<h2 id=\"foo-bar_baz-qux\" class=\"section-\
+          header\"><a href=\"#foo-bar_baz-qux\">Foo-bar_baz qux</a></h2>");
         t("### **Foo** *bar* baz!?!& -_qux_-%",
-          "\n<h3 id='foo-bar-baz--_qux_-' class='section-header'>\
-          <a href='#foo-bar-baz--_qux_-'><strong>Foo</strong> \
-          <em>bar</em> baz!?!&amp; -_qux_-%</a></h3>");
-        t("####**Foo?** & \\*bar?!*  _`baz`_ ❤ #qux",
-          "\n<h4 id='foo--bar--baz--qux' class='section-header'>\
-          <a href='#foo--bar--baz--qux'><strong>Foo?</strong> &amp; *bar?!*  \
+          "\n<h3 id=\"foo-bar-baz--qux-\" class=\"section-header\">\
+          <a href=\"#foo-bar-baz--qux-\"><strong>Foo</strong> \
+          <em>bar</em> baz!?!&amp; -<em>qux</em>-%</a></h3>");
+        t("#### **Foo?** & \\*bar?!*  _`baz`_ ❤ #qux",
+          "\n<h4 id=\"foo--bar--baz--qux\" class=\"section-header\">\
+          <a href=\"#foo--bar--baz--qux\"><strong>Foo?</strong> &amp; *bar?!*  \
           <em><code>baz</code></em> ❤ #qux</a></h4>");
     }
 
@@ -249,18 +416,18 @@ mod tests {
         }
 
         let test = || {
-            t("# Example", "\n<h1 id='example' class='section-header'>\
-              <a href='#example'>Example</a></h1>");
-            t("# Panics", "\n<h1 id='panics' class='section-header'>\
-              <a href='#panics'>Panics</a></h1>");
-            t("# Example", "\n<h1 id='example-1' class='section-header'>\
-              <a href='#example-1'>Example</a></h1>");
-            t("# Main", "\n<h1 id='main-1' class='section-header'>\
-              <a href='#main-1'>Main</a></h1>");
-            t("# Example", "\n<h1 id='example-2' class='section-header'>\
-              <a href='#example-2'>Example</a></h1>");
-            t("# Panics", "\n<h1 id='panics-1' class='section-header'>\
-              <a href='#panics-1'>Panics</a></h1>");
+            t("# Example", "\n<h1 id=\"example\" class=\"section-header\">\
+              <a href=\"#example\">Example</a></h1>");
+            t("# Panics", "\n<h1 id=\"panics\" class=\"section-header\">\
+              <a href=\"#panics\">Panics</a></h1>");
+            t("# Example", "\n<h1 id=\"example-1\" class=\"section-header\">\
+              <a href=\"#example-1\">Example</a></h1>");
+            t("# Main", "\n<h1 id=\"main-1\" class=\"section-header\">\
+              <a href=\"#main-1\">Main</a></h1>");
+            t("# Example", "\n<h1 id=\"example-2\" class=\"section-header\">\
+              <a href=\"#example-2\">Example</a></h1>");
+            t("# Panics", "\n<h1 id=\"panics-1\" class=\"section-header\">\
+              <a href=\"#panics-1\">Panics</a></h1>");
         };
         test();
         reset_ids(true);

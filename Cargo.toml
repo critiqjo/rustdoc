@@ -4,3 +4,6 @@ name = "rustdoc"
 version = "0.0.0"
 
 [dependencies]
+pulldown-cmark = "0.0.8"
+hamlet = "0.2"
+cmark-hamlet = "0.0.2"
